@@ -1,0 +1,73 @@
+name: Module 07 CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-migrate:
+    name: Python 3.11 — Migrations & Pytest Suite
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: ci_user
+          POSTGRES_PASSWORD: ci_ephemeral_password_not_prod
+          POSTGRES_DB: tailoring_orders_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install project dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "psycopg[binary]>=3.2.0,<4.0.0"
+
+      - name: Verify Python bytecode compilation
+        run: |
+          python -m compileall -q app migrations tests
+
+      - name: Verify Alembic migrations on SQLite (upgrade -> downgrade -> upgrade)
+        env:
+          DATABASE_URL: sqlite:////tmp/ci_module07.sqlite3
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
+          rm -f /tmp/ci_module07.sqlite3
+
+      - name: Verify Alembic migrations on PostgreSQL 16 (upgrade -> downgrade -> upgrade)
+        env:
+          DATABASE_URL: postgresql+psycopg://ci_user:ci_ephemeral_password_not_prod@localhost:5432/tailoring_orders_ci
+        run: |
+          alembic upgrade head
+          alembic downgrade base
+          alembic upgrade head
+
+      - name: Run full Pytest suite with coverage
+        run: |
+          pytest -v --cov=app --cov-report=term-missing --cov-fail-under=85
