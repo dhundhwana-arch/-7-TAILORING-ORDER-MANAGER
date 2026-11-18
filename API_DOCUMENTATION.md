@@ -54,7 +54,7 @@ All `/api/v1/*` endpoints (except `/api/v1/tracking/{order_reference}`, which ac
 ### 3.2 Orders (`/api/v1/orders`)
 | Method | Path | Auth | Roles | Purpose |
 |---|---|---|---|---|
-| `POST` | `/api/v1/orders` | Required | `CUSTOMER`, `ADMIN`, `OWNER`, `SYSTEM` | Create order (`201 Created` with one-time `tracking_token`, or `200 OK` on `Idempotency-Key` replay). Enters `DRAFT` or `SUBMITTED` — never `CONFIRMED`. |
+| `POST` | `/api/v1/orders` | Required | `CUSTOMER`, `ADMIN`, `OWNER`, `SYSTEM` | Create order (`201 Created` with one-time `tracking_token`, `200 OK` on identical `Idempotency-Key` replay, or `409 IDEMPOTENCY_KEY_REUSED` if the same key is sent with a different payload). Enters `DRAFT` or `SUBMITTED` — never `CONFIRMED`. |
 | `GET` | `/api/v1/orders` | Required | All authenticated | Paginated list (`CUSTOMER` automatically restricted to own `customer_ref`). Query params: `status`, `customer_ref`, `search`, `is_urgent`, `page`, `page_size`. |
 | `GET` | `/api/v1/orders/{order_id}` | Required | Owner `CUSTOMER` or Staff | Retrieve order by internal ID or `public_order_ref`. `INTERNAL` notes stripped for customers. |
 | `PATCH` | `/api/v1/orders/{order_id}` | Required | Owner `CUSTOMER` or Staff | Pre-confirmation attribute updates (`quotation_ref` staff-only, `measurement_ref`, `customer_instructions`, `is_urgent` admin-only, `expected_version`). Protected after confirmation. |

@@ -46,6 +46,7 @@ Because Module 01 (Customer Accounts) and Module 08 (Admin Auth) do not yet publ
 5. **SQL Injection & Input Hardening:** All database queries use parameterized SQLAlchemy 2.0 Core/ORM statements; Pydantic v2 schemas enforce `extra="forbid"`, length bounds, and regex reference validation (`SAFE_REF_PATTERN`).
 6. **Safe Error Handling:** `SQLAlchemyError` and unhandled exceptions return generic error envelopes (`DATABASE_ERROR`, `INTERNAL_SERVER_ERROR`) without exposing SQL statements, stack traces, or customer attributes.
 7. **Immutable Audit & Snapshot Records:** SQLAlchemy `before_update` and `before_delete` hooks on `OrderSnapshot` and `OrderEvent` block mutation or deletion even from internal Python code.
+8. **Idempotency Payload Integrity:** Order creation requests carrying an `Idempotency-Key` persist a canonical, secret-free SHA-256 payload digest (`orders.idempotency_fingerprint`). Reusing an existing key for the same `customer_ref` with any altered creation attribute returns `409 IDEMPOTENCY_KEY_REUSED`, and the digest is never exposed in API responses.
 
 ---
 

@@ -137,6 +137,23 @@ class MockMeasurementAdapter:
                 },
                 recorded_at=now,
             ),
+            "MEA-001-ALT": MeasurementRecord(
+                measurement_id="MEA-001-ALT",
+                customer_ref="CUS-001",
+                profile_version=2,
+                validation_status="VALIDATED",
+                approval_status="APPROVED",
+                measurements={
+                    "unit": "cm",
+                    "chest": 102.0,
+                    "waist": 88.0,
+                    "shoulder": 45.5,
+                    "sleeve_length": 62.5,
+                    "shirt_length": 75.0,
+                    "neck": 40.0,
+                },
+                recorded_at=now,
+            ),
             "MEA-002": MeasurementRecord(
                 measurement_id="MEA-002",
                 customer_ref="CUS-002",

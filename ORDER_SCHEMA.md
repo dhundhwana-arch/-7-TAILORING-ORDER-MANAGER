@@ -38,6 +38,7 @@ Aggregate root representing a tailoring order.
 | `order_source` | `String(64)` | No | Defaults to `MODULE_01_PLATFORM` |
 | `submission_reference` | `String(128)` | Yes | Indexed; `UNIQUE(order_source, submission_reference)` |
 | `idempotency_key` | `String(128)` | Yes | `UNIQUE(customer_ref, idempotency_key)` |
+| `idempotency_fingerprint` | `String(64)` | Yes | Canonical secret-free SHA-256 request payload digest (never exposed via API) |
 | `currency` | `String(8)` | No | Defaults to `INR` |
 | `measurement_ref` | `String(64)` | No | Module 06 measurement profile reference |
 | `quotation_ref` | `String(64)` | Yes | Module 05 official quotation reference |

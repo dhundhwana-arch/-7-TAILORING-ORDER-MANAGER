@@ -2,6 +2,16 @@
 
 All notable changes to **Module 07 — Tailoring Order Manager** (`dhundhwana-arch/-7-TAILORING-ORDER-MANAGER`) are documented in this file.
 
+## [0.1.1] — 2026-11-18
+
+### Fixed
+- **Idempotency-Key Payload Verification (`app/services/order_service.py`):** Added deterministic, secret-free SHA-256 request payload fingerprinting (`orders.idempotency_fingerprint`) across all semantically relevant creation fields. Reusing an `Idempotency-Key` with any modified field now returns `409 IDEMPOTENCY_KEY_REUSED` across both pre-checks and concurrent `IntegrityError` recovery while keeping `idempotency_fingerprint` unexposed in API responses and preserving backward compatibility for pre-migration rows.
+
+### Added
+- **Alembic Migration (`0002_idempotency_fingerprint`):** Backward-compatible batch schema migration adding `orders.idempotency_fingerprint`.
+- **Idempotency Regression Suite (`tests/test_idempotency_regression.py`):** 7 new automated regression tests (total suite now **41 passed, 0 failed**).
+- **GitHub Actions CI (`.github/workflows/ci.yml`):** Automated Python 3.11 CI running bytecode checks, SQLite & PostgreSQL 16 Alembic upgrade/downgrade roundtrips, and the full Pytest coverage suite.
+
 ## [0.1.0] — 2026-11-18
 
 ### Added

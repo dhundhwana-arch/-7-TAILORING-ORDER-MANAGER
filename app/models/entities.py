@@ -67,6 +67,9 @@ class Order(Base):
         String(128), nullable=True, index=True
     )
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    idempotency_fingerprint: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
 
     currency: Mapped[str] = mapped_column(String(8), nullable=False, default="INR")
     measurement_ref: Mapped[str] = mapped_column(String(64), nullable=False)

@@ -1,6 +1,10 @@
 """Order Creation, Validation, Submission, Confirmation, and Notes Service (Phases 03 & 05)."""
 
 from dataclasses import dataclass
+from decimal import Decimal
+import hashlib
+import hmac
+import json
 from typing import Any
 
 from sqlalchemy import func, or_, select
@@ -61,6 +65,174 @@ class OrderCreationResult:
     order: Order
     tracking_token: str | None
     idempotent_replay: bool
+
+
+def _normalize_json_value(value: Any) -> Any:
+    """Recursively normalize JSON structures for deterministic SHA-256 hashing."""
+    if isinstance(value, dict):
+        return {
+            str(k): _normalize_json_value(v)
+            for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_json_value(v) for v in value]
+    if isinstance(value, Decimal):
+        return str(value)
+    return value
+
+
+def build_canonical_order_payload(
+    *,
+    customer_ref: str,
+    measurement_ref: str,
+    items_payload: list[dict[str, Any]],
+    currency: str = "INR",
+    quotation_ref: str | None = None,
+    order_reference: str | None = None,
+    order_source: str = "MODULE_01_PLATFORM",
+    submission_reference: str | None = None,
+    customer_instructions: str | None = None,
+    is_urgent: bool = False,
+    submit_immediately: bool = False,
+) -> dict[str, Any]:
+    """Build a canonical, normalized representation of all semantically relevant creation fields."""
+    canonical_items: list[dict[str, Any]] = []
+    for raw_item in items_payload:
+        raw_source = raw_item.get("fabric_source") or FabricSource.CUSTOMER_SUPPLIED.value
+        if hasattr(raw_source, "value"):
+            f_source_norm = str(raw_source.value).strip().upper()
+        else:
+            f_source_norm = str(raw_source).strip().upper()
+
+        raw_cust = raw_item.get("customization_data") or {}
+        norm_cust = (
+            _normalize_json_value(raw_cust) if isinstance(raw_cust, dict) else raw_cust
+        )
+
+        raw_var = raw_item.get("fabric_variant_ref")
+        raw_prv = raw_item.get("preview_3d_ref")
+        raw_notes = raw_item.get("item_notes")
+
+        canonical_items.append(
+            {
+                "garment_type": str(raw_item.get("garment_type", "")).strip().lower(),
+                "quantity": raw_item.get("quantity", 1),
+                "design_ref": str(raw_item.get("design_ref") or "").strip(),
+                "fabric_source": f_source_norm,
+                "fabric_ref": str(raw_item.get("fabric_ref") or "").strip(),
+                "fabric_variant_ref": (
+                    str(raw_var).strip() or None if raw_var is not None else None
+                ),
+                "preview_3d_ref": (
+                    str(raw_prv).strip() or None if raw_prv is not None else None
+                ),
+                "customization_data": norm_cust,
+                "item_notes": (
+                    str(raw_notes).strip() or None if raw_notes is not None else None
+                ),
+            }
+        )
+
+    return {
+        "schema": "order_create_v1",
+        "order_reference": (
+            order_reference.strip() or None if order_reference is not None else None
+        ),
+        "customer_ref": customer_ref.strip(),
+        "measurement_ref": measurement_ref.strip(),
+        "quotation_ref": (
+            quotation_ref.strip() or None if quotation_ref is not None else None
+        ),
+        "currency": currency.strip().upper(),
+        "order_source": order_source.strip() or "MODULE_01_PLATFORM",
+        "submission_reference": (
+            submission_reference.strip() or None
+            if submission_reference is not None
+            else None
+        ),
+        "customer_instructions": (
+            customer_instructions.strip() or None
+            if customer_instructions is not None
+            else None
+        ),
+        "is_urgent": bool(is_urgent),
+        "submit_immediately": bool(submit_immediately),
+        "items": canonical_items,
+    }
+
+
+def compute_order_request_fingerprint(canonical_payload: dict[str, Any]) -> str:
+    """Compute a secret-free SHA-256 hex digest over canonical order creation fields."""
+    serialized = json.dumps(
+        canonical_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _reconstruct_legacy_order_fingerprint(
+    existing: Order, *, requested_order_reference: str | None
+) -> str:
+    """Reconstruct canonical fingerprint for pre-migration rows where idempotency_fingerprint is NULL."""
+    submitted_initially = (
+        existing.events[0].event_type == "ORDER_SUBMITTED"
+        if existing.events
+        else existing.current_status != OrderStatus.DRAFT.value
+    )
+    inferred_order_ref = (
+        existing.public_order_ref if requested_order_reference is not None else None
+    )
+    legacy_items = [
+        {
+            "garment_type": it.garment_type,
+            "quantity": it.quantity,
+            "design_ref": it.design_ref,
+            "fabric_source": it.fabric_source,
+            "fabric_ref": it.fabric_ref,
+            "fabric_variant_ref": it.fabric_variant_ref,
+            "preview_3d_ref": it.preview_3d_ref,
+            "customization_data": dict(it.customization_data or {}),
+            "item_notes": it.item_notes,
+        }
+        for it in existing.items
+    ]
+    legacy_payload = build_canonical_order_payload(
+        customer_ref=existing.customer_ref,
+        measurement_ref=existing.measurement_ref,
+        items_payload=legacy_items,
+        currency=existing.currency,
+        quotation_ref=existing.quotation_ref,
+        order_reference=inferred_order_ref,
+        order_source=existing.order_source,
+        submission_reference=existing.submission_reference,
+        customer_instructions=existing.customer_instructions,
+        is_urgent=existing.is_urgent,
+        submit_immediately=submitted_initially,
+    )
+    return compute_order_request_fingerprint(legacy_payload)
+
+
+def _verify_idempotent_replay(
+    existing: Order,
+    *,
+    request_fingerprint: str,
+    canonical_payload: dict[str, Any],
+) -> None:
+    """Verify that an idempotent retry carries the exact same request payload."""
+    expected_fp = existing.idempotency_fingerprint
+    if expected_fp is None:
+        expected_fp = _reconstruct_legacy_order_fingerprint(
+            existing,
+            requested_order_reference=canonical_payload.get("order_reference"),
+        )
+
+    if not hmac.compare_digest(expected_fp, request_fingerprint):
+        raise ConflictError(
+            "Idempotency-Key has already been used with a different order creation payload.",
+            error_code="IDEMPOTENCY_KEY_REUSED",
+        )
 
 
 class OrderService:
@@ -130,7 +302,22 @@ class OrderService:
             or "MODULE_01_PLATFORM"
         )
 
-        # 1. Idempotent replay lookup BEFORE side effects
+        canonical_payload = build_canonical_order_payload(
+            customer_ref=clean_customer,
+            measurement_ref=measurement_ref,
+            items_payload=items_payload,
+            currency=currency,
+            quotation_ref=quotation_ref,
+            order_reference=order_reference,
+            order_source=clean_source,
+            submission_reference=clean_submission_ref,
+            customer_instructions=customer_instructions,
+            is_urgent=is_urgent,
+            submit_immediately=submit_immediately,
+        )
+        request_fingerprint = compute_order_request_fingerprint(canonical_payload)
+
+        # 1. Idempotent replay lookup BEFORE side effects (verifies exact payload fingerprint)
         if clean_idempotency:
             existing_idem = session.scalar(
                 select(Order).where(
@@ -139,13 +326,18 @@ class OrderService:
                 )
             )
             if existing_idem is not None:
+                _verify_idempotent_replay(
+                    existing_idem,
+                    request_fingerprint=request_fingerprint,
+                    canonical_payload=canonical_payload,
+                )
                 return OrderCreationResult(
                     order=existing_idem,
                     tracking_token=None,
                     idempotent_replay=True,
                 )
 
-        # 2. Duplicate submission_reference protection
+        # 2. Duplicate submission_reference protection (handling concurrent idempotent race cleanly)
         if clean_submission_ref:
             existing_sub = session.scalar(
                 select(Order).where(
@@ -154,6 +346,21 @@ class OrderService:
                 )
             )
             if existing_sub is not None:
+                if (
+                    clean_idempotency
+                    and existing_sub.customer_ref == clean_customer
+                    and existing_sub.idempotency_key == clean_idempotency
+                ):
+                    _verify_idempotent_replay(
+                        existing_sub,
+                        request_fingerprint=request_fingerprint,
+                        canonical_payload=canonical_payload,
+                    )
+                    return OrderCreationResult(
+                        order=existing_sub,
+                        tracking_token=None,
+                        idempotent_replay=True,
+                    )
                 raise ConflictError(
                     f"Duplicate submission_reference '{clean_submission_ref}' for source '{clean_source}'.",
                     error_code="DUPLICATE_SUBMISSION",
@@ -166,9 +373,25 @@ class OrderService:
                 order_reference, field_name="order_reference", required=True
             )
             assert public_ref is not None
-            if session.scalar(
-                select(Order.id).where(Order.public_order_ref == public_ref)
-            ):
+            existing_pub = session.scalar(
+                select(Order).where(Order.public_order_ref == public_ref)
+            )
+            if existing_pub is not None:
+                if (
+                    clean_idempotency
+                    and existing_pub.customer_ref == clean_customer
+                    and existing_pub.idempotency_key == clean_idempotency
+                ):
+                    _verify_idempotent_replay(
+                        existing_pub,
+                        request_fingerprint=request_fingerprint,
+                        canonical_payload=canonical_payload,
+                    )
+                    return OrderCreationResult(
+                        order=existing_pub,
+                        tracking_token=None,
+                        idempotent_replay=True,
+                    )
                 raise ConflictError(
                     f"Order reference '{public_ref}' already exists.",
                     error_code="DUPLICATE_ORDER_REFERENCE",
@@ -349,6 +572,9 @@ class OrderService:
             order_source=clean_source,
             submission_reference=clean_submission_ref,
             idempotency_key=clean_idempotency,
+            idempotency_fingerprint=(
+                request_fingerprint if clean_idempotency else None
+            ),
             currency=clean_currency,
             measurement_ref=clean_measurement,
             quotation_ref=clean_quotation,
@@ -366,6 +592,38 @@ class OrderService:
 
         try:
             session.flush()
+
+            creation_event = OrderEvent(
+                event_ref=generate_public_ref("EVT"),
+                order_id=order.id,
+                event_type="ORDER_SUBMITTED" if submit_immediately else "ORDER_CREATED",
+                previous_status=None,
+                new_status=initial_status.value,
+                actor_id=principal.actor_id,
+                actor_role=principal.role.value,
+                reason="Initial order submission"
+                if submit_immediately
+                else "Draft order created",
+                customer_visible=True,
+                customer_message=CUSTOMER_VISIBLE_STATUS_LABELS[initial_status],
+                metadata_json={
+                    "order_source": clean_source,
+                    "item_count": len(validated_items),
+                },
+                created_at=utc_now(),
+            )
+            session.add(creation_event)
+            session.flush()
+
+            if submit_immediately:
+                self._notifications.emit(
+                    session,
+                    order=order,
+                    event_type=NotificationEventType.ORDER_SUBMITTED,
+                    payload={"status": OrderStatus.SUBMITTED.value},
+                )
+
+            session.commit()
         except IntegrityError as exc:
             session.rollback()
             if clean_idempotency:
@@ -376,6 +634,11 @@ class OrderService:
                     )
                 )
                 if existing is not None:
+                    _verify_idempotent_replay(
+                        existing,
+                        request_fingerprint=request_fingerprint,
+                        canonical_payload=canonical_payload,
+                    )
                     return OrderCreationResult(
                         order=existing,
                         tracking_token=None,
@@ -386,35 +649,6 @@ class OrderService:
                 error_code="DUPLICATE_SUBMISSION",
             ) from exc
 
-        creation_event = OrderEvent(
-            event_ref=generate_public_ref("EVT"),
-            order_id=order.id,
-            event_type="ORDER_SUBMITTED" if submit_immediately else "ORDER_CREATED",
-            previous_status=None,
-            new_status=initial_status.value,
-            actor_id=principal.actor_id,
-            actor_role=principal.role.value,
-            reason="Initial order submission" if submit_immediately else "Draft order created",
-            customer_visible=True,
-            customer_message=CUSTOMER_VISIBLE_STATUS_LABELS[initial_status],
-            metadata_json={
-                "order_source": clean_source,
-                "item_count": len(validated_items),
-            },
-            created_at=utc_now(),
-        )
-        session.add(creation_event)
-        session.flush()
-
-        if submit_immediately:
-            self._notifications.emit(
-                session,
-                order=order,
-                event_type=NotificationEventType.ORDER_SUBMITTED,
-                payload={"status": OrderStatus.SUBMITTED.value},
-            )
-
-        session.commit()
         session.refresh(order)
         return OrderCreationResult(
             order=order,

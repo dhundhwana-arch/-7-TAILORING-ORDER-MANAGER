@@ -24,12 +24,12 @@ All tests run hermetically against temporary per-test SQLite databases (`tmp_pat
 
 | Metric | Verified Result |
 |---|---|
-| **Total Tests** | **34** |
-| **Passed** | **34** |
+| **Total Tests** | **41** |
+| **Passed** | **41** |
 | **Failed** | **0** |
 | **Skipped** | **0** |
 | **Not Executed / Blocked** | **0** |
-| **Measured Line Coverage (`app/`)** | **91%** (`2,334` statements, `213` missed — primarily live `httpx` network branches in `http_adapters.py` awaiting deployed sibling services) |
+| **Measured Line Coverage (`app/`)** | **91%** (`2,387` statements, `219` missed — primarily live `httpx` network branches in `http_adapters.py` awaiting deployed sibling services) |
 
 ---
 
